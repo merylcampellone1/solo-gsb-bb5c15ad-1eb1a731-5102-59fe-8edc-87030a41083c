@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>排练字幕修订</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>排练字幕修订</h1>
+  <div class="header-actions">
+    <button id="btnImport" class="primary">导入 SRT</button>
+  </div>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <h2>稿件列表</h2>
+    <ul id="scriptList"></ul>
+  </aside>
+
+  <section id="content">
+    <div id="emptyHint" class="hint">请导入一份 SRT 稿件开始修订。<br>导入后会自动建立两条修订分支。</div>
+    <div id="workspace" hidden>
+      <div class="ws-head">
+        <div>
+          <h2 id="scriptTitle"></h2>
+          <div class="meta" id="scriptMeta"></div>
+        </div>
+        <div class="ws-actions">
+          <button id="btnViewOriginal">查看原稿</button>
+          <a id="btnDownloadOriginal" class="btn" download>下载原稿</a>
+          <button id="btnMerge" class="primary">合并两条分支</button>
+          <button id="btnDeleteScript" class="danger">删除稿件</button>
+        </div>
+      </div>
+
+      <div class="tabs" id="branchTabs"></div>
+      <div id="editor"></div>
+    </div>
+  </section>
+</main>
+
+<!-- 导入对话框 -->
+<dialog id="dlgImport">
+  <form method="dialog" id="formImport">
+    <h3>导入 SRT 稿件</h3>
+    <label>稿件名称（可选，默认用文件名）
+      <input type="text" id="importName" placeholder="例如：第三幕联排">
+    </label>
+    <label>SRT 文件
+      <input type="file" id="importFile" accept=".srt,text/plain" required>
+    </label>
+    <div id="importErrors" class="error-box" hidden></div>
+    <menu>
+      <button value="cancel" type="button" id="importCancel">取消</button>
+      <button type="button" class="primary" id="importSubmit">导入</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- 原稿查看对话框 -->
+<dialog id="dlgOriginal">
+  <h3>原稿内容</h3>
+  <pre id="originalText"></pre>
+  <menu>
+    <button value="cancel" class="primary" id="originalClose">关闭</button>
+  </menu>
+</dialog>
+
+<!-- 合并对话框 -->
+<dialog id="dlgMerge">
+  <h3>合并修订分支</h3>
+  <div id="mergeSummary" class="meta"></div>
+  <div id="mergeEntries"></div>
+  <menu>
+    <button type="button" id="mergeCancel">取消</button>
+    <button type="button" class="primary" id="mergeSubmit" disabled>全部冲突已选择，生成合并分支</button>
+  </menu>
+</dialog>
+
+<div id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
