@@ -7,6 +7,7 @@ const multer = require('multer');
 const db = require('./db');
 const { parseSrt, validateTimeline, toSrt, msToSrt } = require('./srt');
 const { previewMerge, applyMerge, getBranchSegments } = require('./merge');
+const qc = require('./qc');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -185,24 +186,36 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
     const segId = parseInt(req.params.sid, 10);
     getBranchOr404(branchId);
     const seg = db.prepare(
-      'SELECT id, ord FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
 
     const fields = [];
     const values = [];
-    if (req.body.start_ms !== undefined) { fields.push('start_ms = ?'); values.push(readMs(req.body, 'start_ms')); }
-    if (req.body.end_ms !== undefined) { fields.push('end_ms = ?'); values.push(readMs(req.body, 'end_ms')); }
+    let changed = false;
+    if (req.body.start_ms !== undefined) {
+      const v = readMs(req.body, 'start_ms');
+      if (v !== seg.start_ms) changed = true;
+      fields.push('start_ms = ?'); values.push(v);
+    }
+    if (req.body.end_ms !== undefined) {
+      const v = readMs(req.body, 'end_ms');
+      if (v !== seg.end_ms) changed = true;
+      fields.push('end_ms = ?'); values.push(v);
+    }
     if (req.body.text !== undefined) {
       if (typeof req.body.text !== 'string') throw httpError(400, 'text 必须为字符串');
+      if (req.body.text !== seg.text) changed = true;
       fields.push('text = ?');
       values.push(req.body.text);
     }
     if (!fields.length) throw httpError(400, '没有需要更新的字段');
 
+    // 文案/时码任一实质变化即推进片段修订计数，使按片段绑定的质检豁免失效
+    if (changed) { fields.push('rev = rev + 1'); }
     values.push(segId);
     db.prepare(`UPDATE branch_segments SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    res.json({ ok: true });
+    res.json({ ok: true, rev_bumped: changed });
   } catch (e) {
     next(e);
   }
@@ -217,7 +230,7 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
     const cut = readMs(req.body, 'cut_ms');
 
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, rev FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     if (!(cut > seg.start_ms && cut < seg.end_ms)) {
@@ -226,11 +239,12 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
 
     db.transaction(() => {
       db.prepare('UPDATE branch_segments SET ord = ord + 1 WHERE branch_id = ? AND ord > ?').run(branchId, seg.ord);
-      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ? WHERE id = ?')
+      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用
+      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, rev = rev + 1 WHERE id = ?')
         .run(cut, seg.ord, segId);
       const newId = db.prepare(
-        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)'
-      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text).lastInsertRowid;
+        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, rev) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.rev + 1).lastInsertRowid;
       const links = db.prepare(
         'SELECT source_id FROM segment_sources WHERE branch_segment_id = ?'
       ).all(segId);
@@ -270,7 +284,8 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
       `).all(segId, next.id);
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (?, ?)').run(segId, next.id);
       db.prepare('DELETE FROM branch_segments WHERE id = ?').run(next.id);
-      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ? WHERE id = ?')
+      // 合并后文案/时码均可能变化：推进保留片段的修订计数，旧豁免失效
+      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, rev = rev + 1 WHERE id = ?')
         .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, segId);
       const ins = db.prepare('INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)');
       srcs.forEach((x) => ins.run(segId, x.source_id));
@@ -298,9 +313,14 @@ app.post('/api/branches/:id/segments/:sid/reset', (req, res, next) => {
       ORDER BY src.seq LIMIT 1
     `).get(segId);
     if (!row) throw httpError(400, '该片段找不到对应原稿来源，无法恢复');
-    db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ? WHERE id = ?')
-      .run(row.start_ms, row.end_ms, row.text, segId);
-    res.json({ ok: true });
+    const cur = db.prepare('SELECT start_ms, end_ms, text FROM branch_segments WHERE id = ?').get(segId);
+    const changed = !cur || cur.start_ms !== row.start_ms || cur.end_ms !== row.end_ms || cur.text !== row.text;
+    db.prepare(
+      changed
+        ? 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, rev = rev + 1 WHERE id = ?'
+        : 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ? WHERE id = ?'
+    ).run(row.start_ms, row.end_ms, row.text, segId);
+    res.json({ ok: true, rev_bumped: changed });
   } catch (e) {
     next(e);
   }
@@ -430,6 +450,125 @@ app.get('/api/branches/:id/export', (req, res, next) => {
   }
 });
 
+// ---------------- 放映质检 ----------------
+
+// 读取稿件的当前质检规则（未配置时返回 configured:false）
+app.get('/api/scripts/:id/qc-rules', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const script = db.prepare('SELECT id FROM scripts WHERE id = ?').get(id);
+    if (!script) throw httpError(404, '稿件不存在');
+    const row = qc.getCurrentRulesRow(db, id);
+    res.json({
+      script_id: id,
+      configured: !!row,
+      rules: row ? qc.rulesRowToApi(row) : null
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 保存质检规则；无效阈值、空词或重复词拒绝保存（不产生新版本）
+app.put('/api/scripts/:id/qc-rules', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const script = db.prepare('SELECT id FROM scripts WHERE id = ?').get(id);
+    if (!script) throw httpError(404, '稿件不存在');
+
+    const { values, errors } = qc.normalizeRuleInput(req.body || {});
+    if (errors.length) {
+      throw httpError(400, `质检规则校验失败，共 ${errors.length} 处问题，已拒绝保存`, { qc_errors: errors });
+    }
+
+    const result = qc.saveRules(db, id, values);
+    res.status(result.changed ? 201 : 200).json({
+      ok: true,
+      changed: result.changed,
+      rules: qc.rulesRowToApi(qc.getCurrentRulesRow(db, id))
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 生成质检报告（按当前文字与时码；拆分/合并/编辑后须重新生成）
+app.post('/api/branches/:id/qc/reports', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getBranchOr404(id);
+    const report = qc.generateReport(db, id, getBranchSegments);
+    res.status(201).json(report);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 查看最新报告（含失效标记与豁免状态）
+app.get('/api/branches/:id/qc/reports/latest', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getBranchOr404(id);
+    const report = qc.getLatestReport(db, id, getBranchSegments);
+    if (!report) return res.json({ exists: false });
+    res.json({ exists: true, report });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 查看指定报告
+app.get('/api/qc/reports/:rid', (req, res, next) => {
+  try {
+    const rid = parseInt(req.params.rid, 10);
+    res.json(qc.getReport(db, rid, getBranchSegments));
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 对某条命中填写豁免理由
+app.post('/api/branches/:id/qc/hits/:hid/exempt', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const hid = parseInt(req.params.hid, 10);
+    getBranchOr404(id);
+    const reason = req.body && req.body.reason;
+    const report = qc.grantExemption(db, id, hid, reason, getBranchSegments);
+    res.status(201).json({ ok: true, report });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 撤销豁免
+app.delete('/api/branches/:id/qc/exemptions/:eid', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const eid = parseInt(req.params.eid, 10);
+    getBranchOr404(id);
+    const report = qc.revokeExemption(db, id, eid, getBranchSegments);
+    res.json({ ok: true, report });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 质检专用下载：实时重新核验分支、规则、豁免与时间线；不通过不生成 SRT
+app.get('/api/branches/:id/qc/export', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { branch, segments } = qc.checkGate(db, id, getBranchSegments);
+    const script = db.prepare('SELECT name FROM scripts WHERE id = ?').get(branch.script_id);
+    const body = toSrt(segments);
+    const fname = `${script.name}-${branch.name}-质检通过.srt`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
+    res.type('application/x-subrip; charset=utf-8').send(body);
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ---------------- 错误处理 ----------------
 
 app.use((err, req, res, next) => {
@@ -442,7 +581,12 @@ app.use((err, req, res, next) => {
     error: err.message || '服务器内部错误',
     ...(err.errors ? { errors: err.errors } : {}),
     ...(err.issues ? { issues: err.issues } : {}),
-    ...(err.unresolved ? { unresolved: err.unresolved } : {})
+    ...(err.unresolved ? { unresolved: err.unresolved } : {}),
+    ...(err.qc_errors ? { qc_errors: err.qc_errors } : {}),
+    ...(err.timeline_issues ? { timeline_issues: err.timeline_issues } : {}),
+    ...(err.unresolved_hits ? { unresolved_hits: err.unresolved_hits } : {}),
+    ...(err.invalid_exemptions ? { invalid_exemptions: err.invalid_exemptions } : {}),
+    ...(err.report_stale != null ? { report_stale: err.report_stale } : {})
   });
 });
 

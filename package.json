@@ -1,7 +1,7 @@
 {
   "name": "rehearsal-srt",
   "version": "1.0.0",
-  "description": "排练字幕修订 Web 应用：导入 SRT，双分支修订、按来源片段三方合并、校验后导出",
+  "description": "排练字幕修订 Web 应用：导入 SRT，双分支修订、按来源片段三方合并、放映质检（规则/报告/豁免）后导出",
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {

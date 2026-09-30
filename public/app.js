@@ -120,6 +120,7 @@ async function selectBranch(id) {
   state.branch = await api(`/api/branches/${id}`);
   renderTabs();
   renderEditor();
+  await refreshQcPanel();
 }
 
 // ---------------- 编辑器 ----------------
@@ -487,6 +488,250 @@ $('#mergeSubmit').onclick = async () => {
     await selectBranch(result.id);
   } catch (e) { toast(e.message, 'error'); }
 };
+
+// ---------------- 放映质检 ----------------
+
+const qcState = {
+  rulesConfigured: false,
+  rules: null,
+  report: null
+};
+
+function secFromMs(ms) { return ms == null ? '' : (ms / 1000).toString(); }
+
+async function loadQcRules() {
+  const data = await api(`/api/scripts/${state.script.id}/qc-rules`);
+  qcState.rulesConfigured = data.configured;
+  qcState.rules = data.rules;
+}
+
+// 质检规则对话框
+$('#btnQcRules').onclick = async () => {
+  try {
+    await loadQcRules();
+  } catch (e) { return toast(e.message, 'error'); }
+  const r = qcState.rules;
+  $('#qcMinDur').value = r ? secFromMs(r.min_duration_ms) : '';
+  $('#qcMaxDur').value = r ? secFromMs(r.max_duration_ms) : '';
+  $('#qcMaxCps').value = r && r.max_cps != null ? String(r.max_cps) : '';
+  $('#qcMinGap').value = r ? secFromMs(r.min_gap_ms) : '';
+  $('#qcBanned').value = r ? r.banned_words.join('\n') : '';
+  $('#qcRuleMeta').textContent = r
+    ? `当前为规则版本 v${r.version_no}（保存于 ${r.created_at}）。规则内容实质变化会生成新版本，既有豁免将按旧版本保留但不再适用于新报告。`
+    : '该稿件尚未配置质检规则。';
+  $('#qcRuleErrors').hidden = true;
+  $('#dlgQcRules').showModal();
+};
+$('#qcRulesCancel').onclick = () => $('#dlgQcRules').close();
+
+$('#qcRulesSave').onclick = async () => {
+  const body = {
+    min_duration: $('#qcMinDur').value.trim(),
+    max_duration: $('#qcMaxDur').value.trim(),
+    max_cps: $('#qcMaxCps').value.trim(),
+    min_gap: $('#qcMinGap').value.trim(),
+    banned_words: $('#qcBanned').value
+  };
+  try {
+    const result = await api(`/api/scripts/${state.script.id}/qc-rules`, {
+      method: 'PUT', body
+    });
+    qcState.rules = result.rules;
+    qcState.rulesConfigured = true;
+    $('#dlgQcRules').close();
+    toast(result.changed ? `质检规则已保存（新版本 v${result.rules.version_no}），请重新生成报告` : '规则内容未变化，仍为当前版本', result.changed ? 'ok' : '');
+    await refreshQcPanel();
+  } catch (e) {
+    const box = $('#qcRuleErrors');
+    const errs = (e.data && e.data.qc_errors) || [];
+    box.innerHTML = `<div><b>${esc(e.message)}</b></div>` +
+      (errs.length ? `<ul class="issue-list">${errs.map((x) =>
+        `<li><span class="e-line">${esc(x.field || '')}</span>：${esc(x.message)}</li>`).join('')}</ul>` : '');
+    box.hidden = false;
+  }
+};
+
+// 面板渲染与报告刷新
+async function refreshQcPanel() {
+  try {
+    await loadQcRules();
+  } catch (e) { /* 列表场景忽略 */ }
+  const data = await api(`/api/branches/${state.branchId}/qc/reports/latest`);
+  qcState.report = data.exists ? data.report : null;
+  renderQcPanel();
+}
+
+function renderQcPanel() {
+  const panel = $('#qcPanel');
+  const r = qcState.report;
+
+  let html = `
+    <div class="qc-head">
+      <div class="qc-title">放映质检
+        ${qcState.rules ? `<span class="src-tag">规则 v${qcState.rules.version_no}</span>` : '<span class="src-tag">未配置规则</span>'}
+      </div>
+      <div class="qc-actions">
+        <button id="btnQcRun" class="primary">${r ? '重新生成质检报告' : '生成质检报告'}</button>
+        <button id="btnQcDownload">质检专用下载</button>
+      </div>
+    </div>`;
+
+  if (!qcState.rulesConfigured) {
+    html += '<div class="qc-banner warn">尚未为该稿件配置质检规则。请先点右上角「质检规则」配置后再生成报告。</div>';
+  }
+
+  if (!r) {
+    html += '<div class="qc-banner">尚未生成质检报告。生成后可在此查看命中规则、片段序号、原稿来源及原因，并对具体命中填写豁免。</div>';
+  } else {
+    const changed = r.state_changed;
+    const rulesChanged = !r.rules_current;
+    if (changed) {
+      html += '<div class="qc-banner bad">⚠ 分支内容已在报告生成后发生变化（编辑/拆分/合并）。旧结果不得沿用，请重新生成质检报告。</div>';
+    } else if (rulesChanged) {
+      html += `<div class="qc-banner bad">⚠ 质检规则已更新到新版本，本报告基于规则 v${r.rule_version.version_no}，请重新生成质检报告。</div>`;
+    } else {
+      const cls = r.passed ? 'ok' : (r.unresolved_count ? 'bad' : 'warn');
+      const summary = r.passed
+        ? `✓ 质检通过：${r.hit_count} 条命中均已豁免，时间线无问题，可以质检专用下载。`
+        : `共 ${r.hit_count} 条命中：<b>${r.unresolved_count}</b> 条未豁免，${r.exempted_count} 条已豁免；时间线问题 ${r.timeline_issues.length} 处。`;
+      html += `<div class="qc-banner ${cls}">${summary}
+        <span class="meta">报告生成于 ${r.created_at}</span></div>`;
+    }
+
+    html += renderQcTimeline(r);
+    html += renderQcHits(r);
+    if (r.invalid_exemptions && r.invalid_exemptions.length) {
+      html += `<div class="qc-section">
+        <h4>已自动失效的豁免（${r.invalid_exemptions.length}）</h4>
+        <ul class="issue-list">${r.invalid_exemptions.map((x) =>
+          `<li>片段 #${x.ord} · ${esc(x.rule_label)}：${esc(x.hit_message)} —— <span class="e-line">${esc(x.invalid_reason)}</span>（原理由：${esc(x.reason)}）</li>`
+        ).join('')}</ul></div>`;
+    }
+  }
+
+  panel.innerHTML = html;
+
+  $('#btnQcRun').onclick = runQcReport;
+  $('#btnQcDownload').onclick = qcExport;
+
+  if (r && !r.state_changed && r.rules_current) {
+    $$('#qcPanel [data-exempt]').forEach((btn) => {
+      btn.onclick = () => exemptHit(Number(btn.dataset.hitId));
+    });
+    $$('#qcPanel [data-revoke]').forEach((btn) => {
+      btn.onclick = () => revokeExemption(Number(btn.dataset.revoke));
+    });
+  }
+}
+
+function renderQcTimeline(r) {
+  if (!r.timeline_issues.length) {
+    return '<div class="qc-section"><h4 class="qc-ok">时间线：无问题</h4></div>';
+  }
+  return `<div class="qc-section">
+    <h4 class="qc-bad-text">时间线问题（${r.timeline_issues.length}）——存在时间线错误时不生成 SRT</h4>
+    <ul class="issue-list">${r.timeline_issues.map((i) =>
+      `<li>${i.ord ? `片段 #${i.ord}：` : ''}${esc(i.message)}</li>`).join('')}</ul>
+  </div>`;
+}
+
+function renderQcHits(r) {
+  if (!r.hits.length) return '<div class="qc-section"><h4 class="qc-ok">规则命中：无</h4></div>';
+  const stale = r.state_changed || !r.rules_current;
+  const rows = r.hits.map((h) => {
+    const srcs = h.source_seqs.length
+      ? h.source_seqs.map((q) => `<span class="src-tag">原稿 #${q}</span>`).join('')
+      : '<span class="src-tag">无来源</span>';
+    const exempt = h.exemption;
+    const statusCls = exempt ? 'exempt' : 'open';
+    return `
+      <tr class="qc-hit ${statusCls}">
+        <td class="col-ord">${h.ord}</td>
+        <td class="col-rule">${esc(h.rule_label)}${srcs ? `<div>${srcs}</div>` : ''}</td>
+        <td>
+          <div>${esc(h.message)}</div>
+          ${h.timecode ? `<div class="meta">${h.timecode}</div>` : ''}
+          ${stale
+            ? '<div class="meta">（旧报告留档，不提供操作）</div>'
+            : exempt
+              ? `<div class="exempt-box">已豁免（${exempt.created_at}）：${esc(exempt.reason)}
+                   <button data-revoke="${exempt.id}" class="link-btn">撤销豁免</button></div>`
+              : `<div class="exempt-ops"><button data-exempt="${h.id}">填写豁免理由</button></div>`}
+        </td>
+      </tr>`;
+  }).join('');
+  return `<div class="qc-section">
+    <h4>规则命中（${r.hits.length}）</h4>
+    <table class="qc-table"><thead><tr>
+      <th class="col-ord">片段#</th><th class="col-rule">命中规则 / 原稿来源</th><th>原因与豁免</th>
+    </tr></thead><tbody>${rows}</tbody></table>
+  </div>`;
+}
+
+async function runQcReport() {
+  try {
+    const report = await api(`/api/branches/${state.branchId}/qc/reports`, { method: 'POST' });
+    qcState.report = report;
+    renderQcPanel();
+    toast(`质检报告已生成：${report.hit_count} 条命中`, 'ok');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function exemptHit(hitId) {
+  const reason = prompt('请填写该命中的豁免理由（仅对此分支当前片段内容、时码与规则版本有效；之后任一变化即失效）');
+  if (reason === null) return;
+  if (!reason.trim()) return toast('豁免理由不能为空', 'error');
+  try {
+    const data = await api(`/api/branches/${state.branchId}/qc/hits/${hitId}/exempt`, {
+      method: 'POST', body: { reason }
+    });
+    qcState.report = data.report;
+    renderQcPanel();
+    toast('已豁免该命中', 'ok');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function revokeExemption(eid) {
+  if (!confirm('撤销该豁免？撤销后该命中将重新计入未豁免项。')) return;
+  try {
+    const data = await api(`/api/branches/${state.branchId}/qc/exemptions/${eid}`, {
+      method: 'DELETE'
+    });
+    if (data.report) qcState.report = data.report;
+    renderQcPanel();
+    toast('已撤销豁免', 'ok');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function qcExport() {
+  try {
+    const resp = await fetch(`/api/branches/${state.branchId}/qc/export`);
+    if (!resp.ok) {
+      const data = await resp.json();
+      const lines = [data.error];
+      (data.timeline_issues || []).forEach((i) =>
+        lines.push(`· 时间线${i.ord ? ` #${i.ord}` : ''}：${i.message}`));
+      (data.unresolved_hits || []).forEach((h) =>
+        lines.push(`· 片段 #${h.ord} [${h.rule_label}]：${h.message}`));
+      (data.invalid_exemptions || []).forEach((x) =>
+        lines.push(`· 已失效豁免（片段 #${x.ord}）：${x.invalid_reason}`));
+      if (data.report_stale) lines.push('· 报告已失效，请重新生成质检报告');
+      return toast(lines.join('\n'), 'error');
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''(.+)$/.exec(cd);
+    const fname = m ? decodeURIComponent(m[1]) : 'qc-export.srt';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('质检核验通过，已导出 SRT', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
 
 // ---------------- 启动 ----------------
 

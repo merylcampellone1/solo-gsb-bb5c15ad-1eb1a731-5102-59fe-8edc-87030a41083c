@@ -31,6 +31,7 @@
         <div class="ws-actions">
           <button id="btnViewOriginal">查看原稿</button>
           <a id="btnDownloadOriginal" class="btn" download>下载原稿</a>
+          <button id="btnQcRules">质检规则</button>
           <button id="btnMerge" class="primary">合并两条分支</button>
           <button id="btnDeleteScript" class="danger">删除稿件</button>
         </div>
@@ -38,6 +39,7 @@
 
       <div class="tabs" id="branchTabs"></div>
       <div id="editor"></div>
+      <div id="qcPanel"></div>
     </div>
   </section>
 </main>
@@ -77,6 +79,37 @@
   <menu>
     <button type="button" id="mergeCancel">取消</button>
     <button type="button" class="primary" id="mergeSubmit" disabled>全部冲突已选择，生成合并分支</button>
+  </menu>
+</dialog>
+
+<!-- 质检规则对话框 -->
+<dialog id="dlgQcRules">
+  <h3>放映质检规则</h3>
+  <div class="dlg-body">
+    <p class="meta">阈值留空表示不启用该项；时长/间隔按秒计，字符按可见字符计（空白不计，中文与标点各算一字）。无效阈值、空词或重复词将拒绝保存。</p>
+    <div class="qc-form">
+      <label>单条显示时长下限（秒）
+        <input type="text" id="qcMinDur" inputmode="decimal" placeholder="如 1">
+      </label>
+      <label>单条显示时长上限（秒）
+        <input type="text" id="qcMaxDur" inputmode="decimal" placeholder="如 7">
+      </label>
+      <label>每秒可见字符数上限（字符/秒）
+        <input type="text" id="qcMaxCps" inputmode="decimal" placeholder="如 9">
+      </label>
+      <label>相邻片段最小间隔（秒）
+        <input type="text" id="qcMinGap" inputmode="decimal" placeholder="如 0.2">
+      </label>
+      <label class="full">禁用词（每行一个，也可用逗号分隔）
+        <textarea id="qcBanned" rows="4" placeholder="例如：&#10;临时字幕&#10;待定"></textarea>
+      </label>
+    </div>
+    <div id="qcRuleMeta" class="meta"></div>
+    <div id="qcRuleErrors" class="error-box" hidden></div>
+  </div>
+  <menu>
+    <button type="button" id="qcRulesCancel">取消</button>
+    <button type="button" class="primary" id="qcRulesSave">保存规则</button>
   </menu>
 </dialog>
 
