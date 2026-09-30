@@ -31,6 +31,7 @@
         <div class="ws-actions">
           <button id="btnViewOriginal">查看原稿</button>
           <a id="btnDownloadOriginal" class="btn" download>下载原稿</a>
+          <button id="btnQcRules">质检规则</button>
           <button id="btnMerge" class="primary">合并两条分支</button>
           <button id="btnDeleteScript" class="danger">删除稿件</button>
         </div>
@@ -77,6 +78,53 @@
   <menu>
     <button type="button" id="mergeCancel">取消</button>
     <button type="button" class="primary" id="mergeSubmit" disabled>全部冲突已选择，生成合并分支</button>
+  </menu>
+</dialog>
+
+<!-- 质检规则对话框 -->
+<dialog id="dlgQcRules">
+  <h3>放映质检规则</h3>
+  <div class="dlg-body">
+    <p class="qc-tip">阈值以秒计、可留空表示不检查；空白不计字符，中文字符与标点各算一字。至少配置一项。<br>规则内容变化会升版本，之前基于旧版本填写的豁免立即失效。</p>
+    <div class="qc-grid">
+      <label>单条显示时长下限（秒）
+        <input type="number" id="qcMinDur" min="0.001" step="0.001" placeholder="如 0.8">
+      </label>
+      <label>单条显示时长上限（秒）
+        <input type="number" id="qcMaxDur" min="0.001" step="0.001" placeholder="如 7">
+      </label>
+      <label>每秒可见字符数上限（CPS）
+        <input type="number" id="qcMaxCps" min="0.01" step="0.1" placeholder="如 12">
+      </label>
+      <label>相邻片段最小间隔（秒）
+        <input type="number" id="qcMinGap" min="0" step="0.001" placeholder="如 0.2">
+      </label>
+    </div>
+    <label class="qc-words-label">禁用词（逗号、顿号或换行分隔；空词/重复词将被拒绝）
+      <textarea id="qcBanned" rows="3" placeholder="例如：剧透, 待定，口误"></textarea>
+    </label>
+    <div id="qcRuleErrors" class="error-box" hidden></div>
+    <div id="qcRuleMeta" class="meta"></div>
+  </div>
+  <menu>
+    <button type="button" id="qcRulesCancel">取消</button>
+    <button type="button" class="primary" id="qcRulesSave">保存规则</button>
+  </menu>
+</dialog>
+
+<!-- 豁免理由对话框 -->
+<dialog id="dlgExempt">
+  <h3>豁免该条命中</h3>
+  <div class="dlg-body">
+    <div id="exemptHitInfo" class="exempt-hit"></div>
+    <p class="qc-tip">豁免仅对该分支当前的片段内容、时码与当前规则版本有效；之后片段或规则任一变化即自动失效。</p>
+    <label>豁免理由（必填）
+      <textarea id="exemptReason" rows="3" maxlength="500" placeholder="例如：该词为专有名词，已与导演确认"></textarea>
+    </label>
+  </div>
+  <menu>
+    <button type="button" id="exemptCancel">取消</button>
+    <button type="button" class="primary" id="exemptSubmit">确认豁免</button>
   </menu>
 </dialog>
 

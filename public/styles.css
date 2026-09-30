@@ -207,3 +207,52 @@ menu { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px; 
 
 .issue-list { color: var(--danger); font-size: 12px; margin: 8px 0 0; padding-left: 20px; }
 .issue-list li { margin-bottom: 3px; }
+
+/* ---------------- 放映质检 ---------------- */
+
+.qc-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.qc-head {
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  font-weight: 600; margin-bottom: 8px;
+}
+.qc-head .qc-rules { font-weight: 400; color: var(--muted); font-size: 12px; }
+.qc-ok { color: var(--ok); }
+.qc-bad { color: var(--danger); }
+.qc-sub { margin: 12px 0 6px; font-size: 13px; font-weight: 600; }
+.qc-tip { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 10px 0 0; }
+.qc-rules-label { display: block; }
+
+table.qc-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.qc-table th, .qc-table td {
+  padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top;
+}
+.qc-table th { color: var(--muted); background: var(--panel2); font-weight: 600; }
+.qc-table tr.row-exempted { opacity: .65; }
+.qc-table .qc-tc { font-family: ui-monospace, monospace; color: var(--muted); white-space: nowrap; }
+.qc-table .col-ex { width: 230px; }
+
+.ex-badge { border-radius: 4px; padding: 2px 8px; font-size: 11px; display: inline-block; }
+.ex-badge.active { background: #243a2c; color: var(--ok); }
+.ex-badge.dead { background: #4a3a22; color: var(--warn); }
+.ex-reason { font-size: 11px; color: var(--muted); margin: 4px 0; word-break: break-all; }
+.ex-btn { padding: 2px 8px; font-size: 11px; margin: 2px 4px 0 0; }
+
+.qc-orphan-list { font-size: 12px; color: var(--warn); padding-left: 20px; margin: 4px 0; }
+.qc-orphan-list li { margin-bottom: 4px; }
+
+dialog .dlg-body { padding: 16px 20px; max-height: 70vh; overflow-y: auto; }
+dialog .dlg-body label { display: block; margin-bottom: 12px; color: var(--text); font-size: 13px; }
+dialog .dlg-body label input, dialog .dlg-body label textarea { margin-top: 6px; }
+.qc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin-bottom: 12px; }
+.qc-grid label { color: var(--text) !important; font-size: 13px !important; }
+.exempt-hit {
+  background: var(--panel2); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;
+  font-size: 13px;
+}
+.qc-hit-msg { color: var(--muted); margin-top: 6px; font-size: 12px; }

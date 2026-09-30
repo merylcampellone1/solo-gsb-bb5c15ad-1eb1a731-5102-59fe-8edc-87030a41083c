@@ -7,6 +7,7 @@ const multer = require('multer');
 const db = require('./db');
 const { parseSrt, validateTimeline, toSrt, msToSrt } = require('./srt');
 const { previewMerge, applyMerge, getBranchSegments } = require('./merge');
+const qc = require('./qc');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -135,6 +136,39 @@ app.get('/api/scripts/:id/original.srt', (req, res, next) => {
     if (!script) throw httpError(404, '稿件不存在');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${script.name}-原稿.srt`)}`);
     res.type('application/x-subrip; charset=utf-8').send(script.original_srt);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---------------- 质检规则 ----------------
+
+function getScriptOr404(scriptId) {
+  const s = db.prepare('SELECT id, name FROM scripts WHERE id = ?').get(scriptId);
+  if (!s) throw httpError(404, '稿件不存在');
+  return s;
+}
+
+// 查看稿件的质检规则
+app.get('/api/scripts/:id/qc-rules', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getScriptOr404(id);
+    const rules = qc.getRules(db, id);
+    res.json({ configured: !!rules, rules });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 配置质检规则：无效阈值、空词、重复词一律 400 拒绝
+app.put('/api/scripts/:id/qc-rules', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getScriptOr404(id);
+    const norm = qc.normalizeRules(req.body || {});
+    const { version, changed } = qc.saveRules(db, id, norm);
+    res.json({ ok: true, version, changed, rules: qc.getRules(db, id) });
   } catch (e) {
     next(e);
   }
@@ -430,6 +464,130 @@ app.get('/api/branches/:id/export', (req, res, next) => {
   }
 });
 
+// ---------------- 放映质检 ----------------
+
+// 组装 sourceId -> seq 映射（用于报告标注原稿来源）
+function sourceSeqMap(scriptId) {
+  const rows = db.prepare('SELECT id, seq FROM source_segments WHERE script_id = ?').all(scriptId);
+  return new Map(rows.map((r) => [r.id, r.seq]));
+}
+
+// 质检报告：按当前文字与时码实时评估，回填豁免状态
+app.get('/api/branches/:id/qc-report', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    const full = { ...branch, segments };
+    const report = qc.buildReport(db, full, sourceSeqMap(branch.script_id));
+    res.json({ branch_id: id, branch_name: branch.name, ...report });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 对某条命中填写理由作豁免。
+// 服务器按「当前」内容重新核验命中并写入快照；命中已消失则拒绝。
+app.post('/api/branches/:id/qc-exemptions', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segId = parseInt(req.body && req.body.branch_segment_id, 10);
+    const ruleCode = req.body && req.body.rule_code;
+    const detail = req.body && typeof req.body.detail === 'string' ? req.body.detail : '';
+    const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
+    if (!Number.isInteger(segId)) throw httpError(400, '需要提供 branch_segment_id');
+    if (!qc.RULE_CODES.includes(ruleCode)) throw httpError(400, 'rule_code 不合法');
+    if (!reason) throw httpError(400, '请填写豁免理由');
+    if (reason.length > 500) throw httpError(400, '豁免理由不超过 500 字');
+
+    const seg = db.prepare(
+      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE id = ? AND branch_id = ?'
+    ).get(segId, id);
+    if (!seg) throw httpError(404, '片段不存在');
+
+    // 重新核验当前是否确有该命中（拆分/合并/编辑后旧命中不得沿用）
+    const segments = getBranchSegments(db, id);
+    const idx = segments.findIndex((s) => s.id === segId);
+    const prev = idx > 0 ? segments[idx - 1] : null;
+    const report = qc.buildReport(db, { ...branch, segments }, sourceSeqMap(branch.script_id));
+    if (!report.configured) throw httpError(409, '该稿件尚未配置质检规则');
+    const hit = report.hits.find(
+      (h) => h.branch_segment_id === segId && h.rule_code === ruleCode && h.detail === detail
+    );
+    if (!hit) {
+      throw httpError(409, '当前片段内容与时码下不存在该命中，不能豁免（拆分/合并或编辑后请重新质检）');
+    }
+
+    const result = db.prepare(`
+      INSERT INTO qc_exemptions
+        (branch_id, branch_segment_id, rule_code, detail, reason, rule_version,
+         snap_ord, snap_start_ms, snap_end_ms, snap_text, snap_prev_end_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(branch_id, branch_segment_id, rule_code, detail) DO UPDATE SET
+        reason = excluded.reason,
+        rule_version = excluded.rule_version,
+        snap_ord = excluded.snap_ord,
+        snap_start_ms = excluded.snap_start_ms,
+        snap_end_ms = excluded.snap_end_ms,
+        snap_text = excluded.snap_text,
+        snap_prev_end_ms = excluded.snap_prev_end_ms,
+        created_at = datetime('now')
+    `).run(id, segId, ruleCode, detail, reason, report.rule_version,
+      seg.ord, seg.start_ms, seg.end_ms, seg.text,
+      ruleCode === 'gap' && prev ? prev.end_ms : null);
+
+    res.status(201).json({ ok: true, id: result.lastInsertRowid });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 撤销豁免（含已失效的历史豁免）
+app.post('/api/qc-exemptions/:exId/revoke', (req, res, next) => {
+  try {
+    const exId = parseInt(req.params.exId, 10);
+    const info = db.prepare('DELETE FROM qc_exemptions WHERE id = ?').run(exId);
+    if (!info.changes) throw httpError(404, '豁免不存在');
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 质检专用下载：重新核验分支、规则、豁免及现有时间线。
+// 未配置规则 / 仍有未豁免命中 / 时间线错误 → 409，不生成 SRT。
+app.get('/api/branches/:id/qc-download', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    const report = qc.buildReport(db, { ...branch, segments }, sourceSeqMap(branch.script_id));
+    if (!report.configured) {
+      throw httpError(409, '该稿件尚未配置质检规则，请先配置并完成质检', { report });
+    }
+    const unresolved = report.hits.filter(
+      (h) => !h.exemption || h.exemption.status !== 'active'
+    );
+    if (unresolved.length || report.timeline_issues.length) {
+      throw httpError(
+        409,
+        `质检未通过：${unresolved.length} 条未豁免命中，${report.timeline_issues.length} 处时间线错误，未生成 SRT`,
+        { report, issues: report.timeline_issues, unresolved }
+      );
+    }
+
+    // 时间线错误为空时，validateTimeline 的通过条件与普通导出一致
+    const script = db.prepare('SELECT name FROM scripts WHERE id = ?').get(branch.script_id);
+    const body = toSrt(segments);
+    const fname = `${script.name}-${branch.name}-质检通过.srt`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
+    res.type('application/x-subrip; charset=utf-8').send(body);
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ---------------- 错误处理 ----------------
 
 app.use((err, req, res, next) => {
@@ -442,7 +600,8 @@ app.use((err, req, res, next) => {
     error: err.message || '服务器内部错误',
     ...(err.errors ? { errors: err.errors } : {}),
     ...(err.issues ? { issues: err.issues } : {}),
-    ...(err.unresolved ? { unresolved: err.unresolved } : {})
+    ...(err.unresolved ? { unresolved: err.unresolved } : {}),
+    ...(err.report ? { report: err.report } : {})
   });
 });
 
